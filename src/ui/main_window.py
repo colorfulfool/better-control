@@ -7,6 +7,7 @@ import threading
 import sys
 import json
 import os
+import time
 from datetime import datetime
 import signal
 
@@ -78,6 +79,7 @@ class BetterControl(Gtk.Window):
         # Check if minimal mode is enabled
         self.minimal_mode = arg_parser.find_arg(("-m", "--minimal"))
         self._had_focus = False
+        self._last_present = 0.0
         if self.minimal_mode:
             self.logging.log(LogLevel.Info, "Minimal mode enabled")
 
@@ -1143,6 +1145,11 @@ class BetterControl(Gtk.Window):
         if not self._had_focus:
             return False
         self._had_focus = False
+        # Ignore focus loss right after a SIGUSR1 re-present: clicking a bar
+        # icon first steals focus (queuing focus-out) and then signals us to
+        # show — the stale focus-out must not hide the fresh window.
+        if time.monotonic() - self._last_present < 0.5:
+            return False
         for top in Gtk.Window.list_toplevels():
             if (
                 top is not self
@@ -1156,22 +1163,23 @@ class BetterControl(Gtk.Window):
 
     def signal_handler(self, sig, frame):
         """Handle SIGUSR1 signal - toggle window visibility on main thread"""
-        
+
         def toggle_window_visibility():
-            if self.get_property("visible"):
+            requested = read_tab_from_file()
+            requested_page = self.tab_pages.get(requested) if requested else None
+            current_page = self.notebook.get_current_page()
+            if self.get_visible() and (requested_page is None or requested_page == current_page):
+                # Already open on the requested tab (or no tab requested): toggle closed.
                 self.hide()
             else:
-                self.show()
-
-                active_tab = read_tab_from_file()
-
-                if active_tab and active_tab in self.tab_pages:
-                    page_num = self.tab_pages[active_tab]
-                    self.notebook.set_current_page(page_num)
-                    GLib.idle_add(lambda: self.lazy_load_tab(self.notebook, None, page_num))
-
+                # Hidden, or a different tab was requested: show and switch.
+                if requested_page is not None:
+                    self.notebook.set_current_page(requested_page)
+                    GLib.idle_add(lambda: self.lazy_load_tab(self.notebook, None, requested_page))
+                self.present()
+                self._last_present = time.monotonic()
             return False  # Only run once
-        
+
         GLib.idle_add(toggle_window_visibility)
 
     def on_destroy(self, window):
