@@ -358,6 +358,14 @@ def initialize_and_start():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # GTK must be initialized before any IconTheme/Window use.
+    # (main() does this via Gtk.init_check; this entry point did not,
+    # so fresh launches crashed in BetterControl icon preloading.)
+    Gtk.init_check()
+    if not Gtk.init_check()[0]:
+        sys.stderr.write("Failed to initialize GTK\n")
+        sys.exit(1)
+
     apply_environment_variables()
 
     arg_parser = parse_arguments()

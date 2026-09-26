@@ -41,12 +41,25 @@ class BetterControl(Gtk.Window):
         self.cache_dir = os.path.expanduser("~/.cache/better-control")
         os.makedirs(self.cache_dir, exist_ok=True)
         
-        # Preload frequently used icons
-        self._icon_cache = {
-            name: Gtk.IconTheme.get_default().load_icon(name, 16, 0)
-            for name in ["audio-volume-high-symbolic", "network-wireless-symbolic",
-                        "bluetooth-symbolic", "battery-good-symbolic"]
-        }
+        # Preload frequently used icons. Gtk.IconTheme.get_default() returns
+        # None when GTK isn't initialized or there's no display yet (e.g. a
+        # refactor drops the Gtk.init_check call), which used to crash every
+        # fresh launch with AttributeError: 'NoneType' has no 'load_icon'.
+        # Guard so a missing theme only means "no cache", never a crash.
+        try:
+            _theme = Gtk.IconTheme.get_default()
+            self._icon_cache = (
+                {
+                    name: _theme.load_icon(name, 16, 0)
+                    for name in ["audio-volume-high-symbolic", "network-wireless-symbolic",
+                                "bluetooth-symbolic", "battery-good-symbolic"]
+                }
+                if _theme is not None
+                else {}
+            )
+        except Exception as e:
+            logging.log(LogLevel.Error, f"Icon preload failed, continuing without cache: {e}")
+            self._icon_cache = {}
         
         # Initialize thread safety mechanisms
         self._initialized = False
