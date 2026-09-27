@@ -68,6 +68,13 @@ class BetterControl(Gtk.Window):
         self._tab_creation_lock = threading.RLock()
         self._destroy_lock = threading.Lock()
 
+        # Focus-out grace timestamps (seeded at early show, restamped on
+        # every real compositor map and SIGUSR1 present)
+        self._had_focus = False
+        self._last_present = 0.0
+        self._last_mapped = 0.0
+        self._last_focus_in = 0.0
+
         # Safe GTK initialization
         with self._init_lock:
             try:
@@ -76,6 +83,10 @@ class BetterControl(Gtk.Window):
                 self._initialized = True
                 # Show window immediately for faster perceived startup
                 self.show_all()
+                # Seed the focus-out grace: the real map-event stamps this
+                # again on actual compositor map; this covers cold start in
+                # case the event is ever missed.
+                self._last_mapped = time.monotonic()
             except Exception as e:
                 logging.log(LogLevel.Error, f"Window initialization failed: {e}")
                 raise
@@ -91,8 +102,6 @@ class BetterControl(Gtk.Window):
 
         # Check if minimal mode is enabled
         self.minimal_mode = arg_parser.find_arg(("-m", "--minimal"))
-        self._had_focus = False
-        self._last_present = 0.0
         if self.minimal_mode:
             self.logging.log(LogLevel.Info, "Minimal mode enabled")
 
@@ -193,6 +202,7 @@ class BetterControl(Gtk.Window):
         self.connect("destroy", self.on_destroy)
         self.connect("focus-in-event", self.on_focus_in)
         self.connect("focus-out-event", self.on_focus_out)
+        self.connect("map-event", self.on_map_event)
         self.notebook.connect("switch-page", self.on_tab_switched)
         
         signal.signal(signal.SIGUSR1, self.signal_handler)
@@ -1152,17 +1162,26 @@ class BetterControl(Gtk.Window):
 
     def on_focus_in(self, widget, event):
         self._had_focus = True
+        self._last_focus_in = time.monotonic()
+        return False
+
+    def on_map_event(self, widget, event):
+        # Timestamp the real compositor map (not the show() call) so the
+        # focus-out grace below covers resume/output-replug focus churn.
+        self._last_mapped = time.monotonic()
         return False
 
     def on_focus_out(self, widget, event):
         if not self._had_focus:
             return False
-        self._had_focus = False
-        # Ignore focus loss right after a SIGUSR1 re-present: clicking a bar
-        # icon first steals focus (queuing focus-out) and then signals us to
-        # show — the stale focus-out must not hide the fresh window.
-        if time.monotonic() - self._last_present < 0.5:
+        # Ignore focus loss right after map/present/focus-in: clicking a bar
+        # icon first steals focus (queuing focus-out) and compositor focus
+        # churn after resume/replug must not hide a freshly shown window.
+        # NOTE: _had_focus stays True here so a later genuine focus-out
+        # still dismisses the window once the grace has expired.
+        if time.monotonic() - max(self._last_present, self._last_mapped, self._last_focus_in) < 2.0:
             return False
+        self._had_focus = False
         for top in Gtk.Window.list_toplevels():
             if (
                 top is not self
